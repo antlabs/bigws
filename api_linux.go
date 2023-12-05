@@ -32,16 +32,16 @@ type linuxApi interface {
 	apiPoll(tv time.Duration) (retVal int, err error)
 	apiName() string
 	addRead(c *Conn) error
-	addWrite(c *Conn, writeSeq uint16) error
+	addWrite(c *Conn) error
 	delWrite(c *Conn) error
 }
 
 // 创建
-func (e *EventLoop) apiCreate(flag evFlag) (err error) {
+func (e *EventLoop) apiCreate(size int, flag evFlag) (err error) {
 	var state apiState
 
 	if flag&EVENT_EPOLL != 0 {
-		la, err := apiEpollCreate(e)
+		la, err := apiEpollCreate(size, e)
 		if err != nil {
 			return err
 		}

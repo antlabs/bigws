@@ -81,32 +81,8 @@ func (e *iouringState) addRead(c *Conn) error {
 	return nil
 }
 
-func (e *iouringState) addWrite(c *Conn, writeSeq uint16) error {
-	e.mu.Lock()
-	entry := e.ring.GetSQE()
-	e.mu.Unlock()
-	if entry == nil {
-		return errors.New("addRead: fail:GetSQE is nil")
-	}
-
-	conn := e.getConn(uint32(c.fd))
-
-	v, ok := conn.m.Load(uint32(writeSeq))
-	if !ok {
-		return fmt.Errorf("addWrite: fail: writeSeq not found:%d", writeSeq)
-	}
-
-	ioState, ok := v.(*ioUringWrite)
-	if !ok {
-		panic("addWrite: fail: freeBuf not found")
-	}
-
-	entry.PrepareSend(
-		int(c.fd),
-		uintptr((*reflect.SliceHeader)(unsafe.Pointer(&ioState.writeBuf)).Data),
-		uint32(len(ioState.writeBuf)),
-		0)
-	entry.UserData = encodeUserData(uint32(c.fd), opWrite, uint32(writeSeq))
+// write使用epoll托管
+func (e *iouringState) addWrite(c *Conn) error {
 	return nil
 }
 

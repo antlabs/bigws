@@ -32,14 +32,14 @@ type apiState struct {
 	changes []unix.Kevent_t
 }
 
-func (e *EventLoop) apiCreate(flag evFlag) (err error) {
+func (e *EventLoop) apiCreate(size int, flag evFlag) (err error) {
 	var state apiState
 	state.kqfd, err = unix.Kqueue()
 	if err != nil {
 		return err
 	}
 	e.apiState = &state
-	e.apiState.events = make([]unix.Kevent_t, 1024)
+	e.apiState.events = make([]unix.Kevent_t, size)
 
 	_, err = unix.Kevent(state.kqfd, []unix.Kevent_t{{
 		Ident:  0,
@@ -79,7 +79,7 @@ func (e *EventLoop) delWrite(c *Conn) (err error) {
 }
 
 // 新加写事件
-func (e *EventLoop) addWrite(c *Conn, writeSeq uint16) error {
+func (e *EventLoop) addWrite(c *Conn) error {
 	e.mu.Lock()
 	fd := c.getFd()
 	e.apiState.changes = append(e.apiState.changes, unix.Kevent_t{Ident: uint64(fd), Filter: unix.EVFILT_WRITE, Flags: unix.EV_ADD | unix.EV_CLEAR})
@@ -146,7 +146,7 @@ func (e *EventLoop) apiPoll(tv time.Duration) (retVal int, err error) {
 
 			if ev.Filter == unix.EVFILT_WRITE {
 				// 刷新下直接写入失败的数据
-				conn.flushOrClose()
+				conn.wakeUpWrite()
 			}
 
 		}

@@ -567,11 +567,12 @@ func (c *Conn) WriteMessage(op Opcode, writeBuf []byte) (err error) {
 	// 没有使用io_uring
 	if !c.useIoUring() {
 		c.mu.Lock()
+		defer c.mu.Unlock()
+		atomic.AddInt32(&c.nwrite, 1)
 		err = frame.WriteFrame(&fw, c, writeBuf, true, rsv1, c.client, op, maskValue)
-		c.mu.Unlock()
+		atomic.AddInt32(&c.nwrite, -1)
 	} else {
-		// 使用io_uring
-		err = c.WriteFrameOnlyIoUring(&fw, writeBuf, true, rsv1, c.client, op, maskValue)
+		// TODO
 	}
 	return err
 }

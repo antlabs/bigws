@@ -27,22 +27,20 @@ const (
 )
 
 type EventLoop struct {
-	mu        sync.Mutex
-	conns     sync.Map
-	maxFd     int // highest file descriptor currently registered
-	setSize   int // max number of file descriptors tracked
-	*apiState     // 每个平台对应的异步io接口/epoll/kqueue/iouring
-	shutdown  bool
-	parent    *MultiEventLoop
+	mu           sync.Mutex
+	conns        sync.Map
+	overflow     map[int]*Conn
+	prevOverFlow int
+	*apiState    // 每个平台对应的异步io接口/epoll/kqueue/iouring
+	shutdown     bool
+	parent       *MultiEventLoop
 }
 
 // 初始化函数
-func CreateEventLoop(setSize int, flag evFlag) (e *EventLoop, err error) {
-	e = &EventLoop{
-		setSize: setSize,
-		maxFd:   -1,
-	}
-	err = e.apiCreate(flag)
+func CreateEventLoop(size int, flag evFlag) (e *EventLoop, err error) {
+	e = &EventLoop{}
+	e.overflow = make(map[int]*Conn)
+	err = e.apiCreate(size, flag)
 	return e, err
 }
 
@@ -56,11 +54,28 @@ func (el *EventLoop) StartLoop() {
 }
 
 func (el *EventLoop) Loop() {
+	index := 1
+	maxIndex := 30
+	base := time.Millisecond * 250
+
 	for !el.shutdown {
-		_, err := el.apiPoll(time.Duration(time.Second * 100))
+		_, err := el.apiPoll(time.Duration(int(base) * index))
 		if err != nil {
 			el.parent.Error("apiPolll", "err", err.Error())
 			return
+		}
+
+		if el.prevOverFlow < len(el.overflow) {
+			el.prevOverFlow = len(el.overflow)
+			index++
+		} else {
+			index--
+		}
+
+		if index < 0 {
+			index = 1
+		} else if index > maxIndex {
+			index = maxIndex
 		}
 	}
 }

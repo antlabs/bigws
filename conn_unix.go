@@ -4,21 +4,16 @@
 package greatws
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/antlabs/wsutil/bytespool"
-	"github.com/antlabs/wsutil/enum"
-	"github.com/antlabs/wsutil/fixedwriter"
-	"github.com/antlabs/wsutil/frame"
-	"github.com/antlabs/wsutil/mask"
-	"github.com/antlabs/wsutil/opcode"
 	"golang.org/x/sys/unix"
 )
 
@@ -44,50 +39,20 @@ func (s ioUringOpState) String() string {
 	}
 }
 
-type ioUringWrite struct {
-	free     func()
-	writeBuf []byte
-}
-
-// 只存放io-uring相关的控制信息
-type onlyIoUringState struct {
-	wSeq uint32
-	m    sync.Map
-}
-
-type writeState int32
-
-const (
-	writeDefault writeState = 1 << iota
-	writeEagain
-	writeSuccess
-)
-
-func (s writeState) String() string {
-	switch s {
-	case writeDefault:
-		return "default"
-	case writeEagain:
-		return "eagain"
-	default:
-		return "invalid"
-	}
-}
-
 type Conn struct {
 	conn
 
-	// 存在io-uring相关的控制信息
-	onlyIoUringState
-
-	wbuf             *[]byte // 写缓冲区, 当直接Write失败时，会将数据写入缓冲区
 	mu               sync.Mutex
+	ctx              context.Context
+	cancel           context.CancelFunc
+	canBeWrite       chan struct{}
 	client           bool  // 客户端为true，服务端为false
-	*Config                // 配置
 	closed           int32 // 是否关闭
 	waitOnMessageRun sync.WaitGroup
 	closeOnce        sync.Once
 	parent           *EventLoop
+	nwrite           int32
+	*Config          // 配置
 }
 
 func (c *Conn) setParent(el *EventLoop) {
@@ -100,14 +65,18 @@ func (c *Conn) getParent() *EventLoop {
 
 func newConn(fd int64, client bool, conf *Config) *Conn {
 	rbuf := bytespool.GetBytes(conf.initPayloadSize())
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Conn{
 		conn: conn{
 			fd:   fd,
 			rbuf: rbuf,
 		},
 		// 初始化不分配内存，只有在需要的时候才分配
-		Config: conf,
-		client: client,
+		Config:     conf,
+		client:     client,
+		canBeWrite: make(chan struct{}, 1),
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 
 	return c
@@ -118,12 +87,12 @@ func duplicateSocket(socketFD int) (int, error) {
 }
 
 func (c *Conn) closeInner(err error) {
+	c.cancel()
 	fd := c.getFd()
 	c.getLogger().Debug("close conn", slog.Int64("fd", int64(fd)))
 	c.multiEventLoop.del(c)
 	atomic.StoreInt64(&c.fd, -1)
 	c.closeOnce.Do(func() {
-		c.OnClose(c, nil)
 		atomic.StorePointer((*unsafe.Pointer)((unsafe.Pointer)(&c.parent)), nil)
 	})
 	atomic.StoreInt32(&c.closed, 1)
@@ -133,11 +102,17 @@ func (c *Conn) closeAndWaitOnMessage(wait bool, err error) {
 	if c.isClosed() {
 		return
 	}
+	c.cancel()
 	if wait {
 		c.waitOnMessageRun.Wait()
 	}
 
 	c.mu.Lock()
+	if c.isClosed() {
+		c.mu.Unlock()
+		return
+	}
+
 	c.closeInner(err)
 	c.mu.Unlock()
 }
@@ -154,41 +129,11 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	if c.isClosed() {
 		return 0, ErrClosed
 	}
-	// 如果缓冲区有数据，合并数据
-	curN := len(b)
 
-	needAppend := false
-	if c.wbuf != nil && len(*c.wbuf) > 0 {
-		needAppend = true
-		old := c.wbuf
-		*c.wbuf = append(*c.wbuf, b...)
-		c.getLogger().Debug("write message", "wbuf_size", len(*c.wbuf), "newbuf.size", len(b))
-		if old != c.wbuf {
-			PutPayloadBytes(old)
-		}
-		b = *c.wbuf
-	}
-
-	total, ws, err := c.writeOrAddPoll(b)
-	if err != nil {
-		return 0, err
-	}
-
-	if needAppend {
-		c.getLogger().Debug("write after",
-			"total", total,
-			"err-is-nil", err == nil,
-			"need-write", len(b),
-			"addr", c.getPtr(),
-			"closed", c.isClosed(),
-			"fd", c.getFd(),
-			"write_state", ws.String())
-	}
-	// 出错
-	return curN, err
+	return c.writeOrWait(b)
 }
 
-func (c *Conn) writeOrAddPoll(b []byte) (total int, ws writeState, err error) {
+func (c *Conn) writeOrWait(b []byte) (total int, err error) {
 	// i 的目的是debug的时候使用
 	var n int
 	fd := c.getFd()
@@ -206,29 +151,31 @@ func (c *Conn) writeOrAddPoll(b []byte) (total int, ws writeState, err error) {
 			}
 
 			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-				if n < 0 {
-					n = 0
+
+				if err := c.multiEventLoop.addWrite(c); err != nil {
+					return total, err
 				}
 
-				// 记录写入的数据，如果有写入，分配一个新的缓冲区
-				if total+n > 0 {
-					newBuf := GetPayloadBytes(len(b) - n)
-					copy(*newBuf, b[n:])
-					if c.wbuf != nil {
-						PutPayloadBytes(c.wbuf)
-					}
-					c.wbuf = newBuf
+				c.getLogger().Error("writeOrWait",
+					"write_eagin", err.Error(),
+					"fd", c.getFd(),
+					"b.len", len(b),
+					"nwrite", total)
+				select {
+				case <-c.canBeWrite:
+				case <-c.ctx.Done():
 				}
 
-				if err = c.multiEventLoop.addWrite(c, 0); err != nil {
-					return total, writeDefault, err
+				if err := c.multiEventLoop.delWrite(c); err != nil {
+					return total, err
 				}
-				return total, writeEagain, nil
+				// 被唤醒后，继续写入数据
+				continue
 			}
 
-			c.getLogger().Error("writeOrAddPoll", "err", err.Error(), slog.Int64("fd", c.fd), slog.Int("b.len", len(b)))
+			c.getLogger().Error("writeOrWait", "err", err.Error(), slog.Int64("fd", c.fd), slog.Int("b.len", len(b)))
 			c.closeInner(err)
-			return total, writeDefault, err
+			return total, err
 		}
 
 		if n > 0 {
@@ -237,47 +184,23 @@ func (c *Conn) writeOrAddPoll(b []byte) (total int, ws writeState, err error) {
 		}
 	}
 
-	// 如果写缓存区有数据，b 参数就是c.wbuf
-	if c.wbuf != nil && len(*c.wbuf) > 0 && len(*c.wbuf) == total {
-		PutPayloadBytes(c.wbuf)
-		c.wbuf = nil
-		if err := c.multiEventLoop.delWrite(c); err != nil {
-			return total, writeDefault, err
-		}
-	}
-	return total, writeSuccess, nil
+	return total, nil
 }
 
-// 该函数有3个动作
-// 写成功
-// EAGAIN，等待可写再写
-// 报错，直接关闭这个fd
-func (c *Conn) flushOrClose() (err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+// 该函主要用于唤醒等待写事件的协程
+func (c *Conn) wakeUpWrite() (err error) {
 	if c.isClosed() {
 		return ErrClosed
 	}
 
-	if c.wbuf != nil {
-		b := *c.wbuf
-		total, ws, err := c.writeOrAddPoll(b)
-
-		c.getLogger().Debug("flush or close after",
-			"total", total,
-			"err-is-nil", err == nil,
-			"need-write", len(b),
-			"addr", c.getPtr(),
-			"closed", c.isClosed(),
-			"fd", c.getFd(),
-			"write_state", ws.String())
-	} else {
-		c.getLogger().Debug("wbuf is nil", "fd", c.getFd())
-		if err := c.multiEventLoop.delWrite(c); err != nil {
-			return err
-		}
+	select {
+	case <-c.ctx.Done():
+		return
+	case c.canBeWrite <- struct{}{}:
+	default:
 	}
+
+	c.getLogger().Debug("writeOrWait_wakup", "fd", c.getFd())
 	return err
 }
 
@@ -365,58 +288,4 @@ func (c *Conn) processWebsocketFrame() (n int, err error) {
 
 func closeFd(fd int) {
 	unix.Close(int(fd))
-}
-
-func (c *Conn) WriteFrameOnlyIoUring(fw *fixedwriter.FixedWriter, payload []byte, fin bool, rsv1 bool, isMask bool, code opcode.Opcode, maskValue uint32) (err error) {
-	buf := bytespool.GetBytes(len(payload) + enum.MaxFrameHeaderSize)
-
-	var wIndex int
-	fw.Reset(*buf)
-
-	if wIndex, err = frame.WriteHeader(*buf, fin, rsv1, false, false, code, len(payload), isMask, maskValue); err != nil {
-		goto free
-	}
-
-	fw.SetW(wIndex)
-	_, err = fw.Write(payload)
-	if err != nil {
-		goto free
-	}
-	if isMask {
-		mask.Mask(fw.Bytes()[wIndex:], maskValue)
-	}
-
-	for i := 0; i < 3; i++ {
-
-		c.mu.Lock()
-		c.wSeq++
-		if c.wSeq == math.MaxUint16 {
-			c.wSeq = 0
-		}
-		newSeq := c.wSeq
-		if _, ok := c.m.Load(newSeq); ok {
-			c.mu.Unlock()
-			continue
-		}
-
-		fb := &ioUringWrite{
-			writeBuf: fw.Bytes(),
-			free: func() {
-				bytespool.PutBytes(buf)
-			},
-		}
-		c.onlyIoUringState.m.Store(newSeq, fb)
-		fw.Free()
-		c.getLogger().Debug("store seq", slog.Int("seq", int(newSeq)), slog.Int64("fd", c.fd))
-		err = c.parent.addWrite(c, uint16(newSeq))
-		c.mu.Unlock()
-		return
-	}
-
-	err = fmt.Errorf("store seq failed")
-
-free:
-	fw.Free()
-	bytespool.PutBytes(buf)
-	return
 }
