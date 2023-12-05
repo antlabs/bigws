@@ -162,8 +162,8 @@ func toMsec(tv time.Duration) int {
 }
 
 // 事件循环
-func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
-	retVal, err = unix.EpollWait(e.epfd, e.events, toMsec(tv))
+func (e *epollState) apiPoll(tv time.Duration) (numEvents int, err error) {
+	numEvents, err = unix.EpollWait(e.epfd, e.events, toMsec(tv))
 	// 统计poll次数
 	e.parent.parent.addPollEv()
 	if err != nil {
@@ -192,9 +192,7 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 		}
 	}
 
-	numEvents := 0
-	if retVal > 0 {
-		numEvents = retVal
+	if numEvents > 0 {
 		for i := 0; i < numEvents; i++ {
 			ev := &e.events[i]
 			conn := e.parent.parent.getConn(int(ev.Fd))
@@ -247,7 +245,6 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 			}
 
 		}
-
 	}
 
 	return numEvents, nil
