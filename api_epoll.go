@@ -164,6 +164,7 @@ func toMsec(tv time.Duration) int {
 // 事件循环
 func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 	retVal, err = unix.EpollWait(e.epfd, e.events, toMsec(tv))
+	// 统计poll次数
 	e.parent.parent.addPollEv()
 	if err != nil {
 		if errors.Is(err, unix.EINTR) {
@@ -172,11 +173,11 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 		return 0, err
 	}
 
+	// 处理overflow的连接
 	overflow := e.parent.overflow
 	if !e.parent.parent.t.highLoad() && len(overflow) > 0 {
 		e.parent.parent.Debug("process overflow")
 		for fd, conn := range overflow {
-			// 读取数据，这里要发行下websocket的解析变成流式解析
 			_, err = conn.processWebsocketFrame()
 			if err != nil {
 				go conn.closeAndWaitOnMessage(true, err)
@@ -187,7 +188,6 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 				go conn.closeAndWaitOnMessage(true, err)
 				continue
 			}
-			e.resetRead(conn)
 			delete(overflow, fd)
 		}
 	}
@@ -244,7 +244,6 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 					go conn.closeAndWaitOnMessage(true, err)
 					continue
 				}
-				e.resetRead(conn)
 			}
 
 		}

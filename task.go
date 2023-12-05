@@ -73,7 +73,7 @@ func (t *task) highLoad() bool {
 }
 
 // 新增任务, 如果任务队列满了, 新增go程， 这可能会导致协程数超过最大值, 为了防止死锁，还是需要新增业务go程
-// 在io线程里面会判断go程池是否高负载，如果是高负载，会取消read的任务, 放到overflow里面
+// 在io线程里面会判断go程池是否高负载，如果是高负载，会取消read的任务, 放到overflow里面, 延后再处理
 func (t *task) addTask(f func() bool) {
 	for {
 		select {
@@ -114,7 +114,7 @@ func (t *task) needResize() bool {
 
 	curTask := atomic.LoadInt64(&t.curTask)
 	curGo := atomic.LoadInt64(&t.curGo)
-	return curTask < int64(t.max) && (float64(curTask)/float64(curGo)) > 0.8
+	return (float64(curTask) / float64(curGo)) > 0.8
 }
 
 // 管理go程
