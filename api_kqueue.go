@@ -138,7 +138,7 @@ func (e *EventLoop) apiPoll(tv time.Duration) (retVal int, err error) {
 				// 读取数据，这里要发行下websocket的解析变成流式解析
 				_, err = conn.processWebsocketFrame()
 				if err != nil {
-					go conn.closeAndWaitOnMessage(true, err)
+					go conn.closeAndWaitOnMessage(false, err)
 					continue
 				}
 

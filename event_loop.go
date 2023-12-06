@@ -24,22 +24,25 @@ type evFlag int
 const (
 	EVENT_EPOLL evFlag = 1 << iota
 	EVENT_IOURING
+	defaultWriteTimeout = 250 * time.Millisecond
 )
 
 type EventLoop struct {
-	mu           sync.Mutex
-	conns        sync.Map
-	overflow     map[int]*Conn
-	prevOverFlow int
-	*apiState    // 每个平台对应的异步io接口/epoll/kqueue/iouring
-	shutdown     bool
-	parent       *MultiEventLoop
+	mu               sync.Mutex
+	conns            sync.Map
+	overflowRead     *RWMap[int, *Conn]
+	overflowWrite    *RWMap[int, *Conn]
+	prevOverFlowRead int
+	shutdown         bool
+	*apiState        // 每个平台对应的异步io接口/epoll/kqueue/iouring
+	parent           *MultiEventLoop
 }
 
 // 初始化函数
 func CreateEventLoop(size int, flag evFlag) (e *EventLoop, err error) {
 	e = &EventLoop{}
-	e.overflow = make(map[int]*Conn)
+	e.overflowRead = New[int, *Conn](512)
+	e.overflowWrite = New[int, *Conn](512)
 	err = e.apiCreate(size, flag)
 	return e, err
 }
@@ -65,8 +68,7 @@ func (el *EventLoop) Loop() {
 			return
 		}
 
-		if el.prevOverFlow < len(el.overflow) {
-			el.prevOverFlow = len(el.overflow)
+		if el.prevOverFlowRead < el.overflowRead.Len() {
 			index++
 		} else {
 			index--
@@ -77,6 +79,7 @@ func (el *EventLoop) Loop() {
 		} else if index > maxIndex {
 			index = maxIndex
 		}
+		el.prevOverFlowRead = el.overflowRead.Len()
 	}
 }
 

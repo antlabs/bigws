@@ -87,14 +87,20 @@ func duplicateSocket(socketFD int) (int, error) {
 }
 
 func (c *Conn) closeInner(err error) {
-	c.cancel()
 	fd := c.getFd()
+	if c.isClosed() {
+		return
+	}
+	c.cancel()
+
 	c.getLogger().Debug("close conn", slog.Int64("fd", int64(fd)))
 	c.multiEventLoop.del(c)
+	c.parent.overflowRead.Delete(fd)
+	c.parent.overflowWrite.Delete(fd)
 	atomic.StoreInt64(&c.fd, -1)
-	c.closeOnce.Do(func() {
-		atomic.StorePointer((*unsafe.Pointer)((unsafe.Pointer)(&c.parent)), nil)
-	})
+	// c.closeOnce.Do(func() {
+	// 	atomic.StorePointer((*unsafe.Pointer)((unsafe.Pointer)(&c.parent)), nil)
+	// })
 	atomic.StoreInt32(&c.closed, 1)
 }
 
@@ -102,7 +108,6 @@ func (c *Conn) closeAndWaitOnMessage(wait bool, err error) {
 	if c.isClosed() {
 		return
 	}
-	c.cancel()
 	if wait {
 		c.waitOnMessageRun.Wait()
 	}
@@ -164,6 +169,7 @@ func (c *Conn) writeOrWait(b []byte) (total int, err error) {
 				select {
 				case <-c.canBeWrite:
 				case <-c.ctx.Done():
+					return total, c.ctx.Err()
 				}
 
 				if err := c.multiEventLoop.delWrite(c); err != nil {
@@ -235,7 +241,7 @@ func (c *Conn) processWebsocketFrame() (n int, err error) {
 			// 读到eof，直接关闭
 			if n == 0 && len((*c.rbuf)[c.rw:]) > 0 {
 				go func() {
-					c.closeAndWaitOnMessage(true, io.EOF)
+					c.closeAndWaitOnMessage(false, io.EOF)
 					c.OnClose(c, io.EOF)
 				}()
 				return

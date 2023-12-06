@@ -570,6 +570,10 @@ func (c *Conn) WriteMessage(op Opcode, writeBuf []byte) (err error) {
 		defer c.mu.Unlock()
 		atomic.AddInt32(&c.nwrite, 1)
 		err = frame.WriteFrame(&fw, c, writeBuf, true, rsv1, c.client, op, maskValue)
+		if err != nil {
+			c.closeInner(err)
+			c.OnClose(c, err)
+		}
 		atomic.AddInt32(&c.nwrite, -1)
 	} else {
 		// TODO

@@ -12,7 +12,7 @@ import (
 func (c *Conn) processRead(cqe *giouring.CompletionQueueEvent) error {
 	// 返回值小于等于0，表示读取完毕，关闭连接
 	if cqe.Res <= 0 {
-		go c.closeAndWaitOnMessage(true, io.EOF)
+		go c.closeAndWaitOnMessage(false, io.EOF)
 		c.getLogger().Debug("read res <= 0", "res", cqe.Res, "fd", c.fd)
 		return nil
 	}
@@ -51,6 +51,6 @@ func (c *Conn) processWrite(cqe *giouring.CompletionQueueEvent, writeSeq uint32)
 }
 
 func (c *Conn) processClose(cqe *giouring.CompletionQueueEvent) error {
-	go c.closeAndWaitOnMessage(true, io.EOF)
+	go c.closeAndWaitOnMessage(false, io.EOF)
 	return nil
 }

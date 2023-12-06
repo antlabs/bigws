@@ -79,7 +79,7 @@ func (t *task) addTask(f func() bool) {
 		select {
 		case t.c <- f:
 			return
-		default:
+		case <-time.After(time.Millisecond * 250):
 			t.addGo()
 		}
 	}

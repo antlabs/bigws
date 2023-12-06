@@ -165,7 +165,7 @@ func toMsec(tv time.Duration) int {
 func (e *epollState) apiPoll(tv time.Duration) (numEvents int, err error) {
 	numEvents, err = unix.EpollWait(e.epfd, e.events, toMsec(tv))
 	// 统计poll次数
-	e.parent.parent.addPollEv()
+	e.parent.parent.addPollEvNum()
 	if err != nil {
 		if errors.Is(err, unix.EINTR) {
 			return 0, nil
@@ -173,25 +173,31 @@ func (e *epollState) apiPoll(tv time.Duration) (numEvents int, err error) {
 		return 0, err
 	}
 
-	// 处理overflow的连接
-	overflow := e.parent.overflow
-	if !e.parent.parent.t.highLoad() && len(overflow) > 0 {
-		e.parent.parent.Debug("process overflow")
-		for fd, conn := range overflow {
+	// 处理overflowRead的连接
+	overflowRead := e.parent.overflowRead
+	if !e.parent.parent.t.highLoad() && overflowRead.Len() > 0 {
+		e.parent.parent.Debug("process overflowRead", "total", overflowRead.Len())
+		overflowRead.RangeSafe(func(fd int, conn *Conn) bool {
 			_, err = conn.processWebsocketFrame()
 			if err != nil {
-				go conn.closeAndWaitOnMessage(true, err)
-				continue
+				go conn.closeAndWaitOnMessage(false, err)
+				return true
 			}
 
 			if err := e.resetRead(conn); err != nil {
-				go conn.closeAndWaitOnMessage(true, err)
-				continue
+				go conn.closeAndWaitOnMessage(false, err)
+				return true
 			}
-			delete(overflow, fd)
-		}
+			overflowRead.RangeDelete(fd)
+			return true
+		})
 	}
 
+	overflowWrite := e.parent.overflowWrite
+	if overflowWrite.Len() > 0 {
+	}
+
+	e.parent.parent.Debug("overflowWrite", "numEvents", overflowWrite.Len())
 	if numEvents > 0 {
 		for i := 0; i < numEvents; i++ {
 			ev := &e.events[i]
@@ -203,9 +209,11 @@ func (e *epollState) apiPoll(tv time.Duration) (numEvents int, err error) {
 
 			// 如果是关闭事件，直接关闭
 			if ev.Events&unix.EPOLLRDHUP > 0 {
-				go conn.closeAndWaitOnMessage(true, io.EOF)
+				e.parent.parent.Debug("read io.EOF", "fd", conn.getFd())
+				go conn.closeAndWaitOnMessage(false, io.EOF)
 				continue
 			}
+
 			// 如果是错误事件，直接关闭
 			if ev.Events&(unix.EPOLLERR|unix.EPOLLHUP) > 0 {
 				go conn.closeAndWaitOnMessage(false, io.EOF)
@@ -214,36 +222,39 @@ func (e *epollState) apiPoll(tv time.Duration) (numEvents int, err error) {
 
 			// 如果是写事件，唤醒下write 阻塞的协程
 			if ev.Events&unix.EPOLLOUT > 0 {
-				e.parent.parent.addWriteEv()
+				e.parent.parent.Debug("epollout", "fd", conn.getFd())
+				e.parent.parent.addWriteEvNum()
 				// 唤醒下write 阻塞的协程
 				conn.wakeUpWrite()
 			}
 
-			// 先判断下是否是高负载, 如果是高负载，直接放入到overflow中, 过段时间再处理
+			// 先判断下是否是高负载, 如果是高负载，直接放入到overflowRead中, 过段时间再处理
 			if e.parent.parent.t.highLoad() {
 				if atomic.LoadInt32(&conn.nwrite) > 0 {
-					e.parent.parent.addWriteEv()
+					// e.parent.parent.addWrite(c)
+					e.parent.parent.addWriteEvNum()
+					e.parent.overflowWrite.Store(conn.getFd(), conn)
 				}
-				e.parent.overflow[conn.getFd()] = conn
+
+				e.parent.overflowRead.Store(conn.getFd(), conn)
 				continue
 			}
 
 			if ev.Events&unix.EPOLLIN > 0 {
-				e.parent.parent.addReadEv()
+				e.parent.parent.addReadEvNum()
 
 				// 读取数据，这里要发行下websocket的解析变成流式解析
 				_, err = conn.processWebsocketFrame()
 				if err != nil {
-					go conn.closeAndWaitOnMessage(true, err)
+					go conn.closeAndWaitOnMessage(false, err)
 					continue
 				}
 
 				if err := e.resetRead(conn); err != nil {
-					go conn.closeAndWaitOnMessage(true, err)
+					go conn.closeAndWaitOnMessage(false, err)
 					continue
 				}
 			}
-
 		}
 	}
 
