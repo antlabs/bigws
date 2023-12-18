@@ -1,5 +1,5 @@
-github.com/antlabs/wsutil v0.1.5 h1:hddINTf+V3KWftjvBGL6Uu3p42OrKCAge8C3wxUxkik=
-github.com/antlabs/wsutil v0.1.5/go.mod h1:7ec5eUM7nmKW+Oi6F1I58iatOeL9k+yIsfOh1zh910g=
+github.com/antlabs/wsutil v0.1.6 h1:K7wR+EvqQT1Nn7jAKs3dKsGtUykPD2OYlCicv4/tUf8=
+github.com/antlabs/wsutil v0.1.6/go.mod h1:7ec5eUM7nmKW+Oi6F1I58iatOeL9k+yIsfOh1zh910g=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/pawelgaczynski/giouring v0.0.0-20230826085535-69588b89acb9 h1:Cu/CW2nKeqXinVjf5Bq1FeBD4jWG/msC5UazjjgAvsU=

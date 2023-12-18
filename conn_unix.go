@@ -4,6 +4,7 @@
 package greatws
 
 import (
+	"container/list"
 	"errors"
 	"fmt"
 	"io"
@@ -77,10 +78,10 @@ func (s writeState) String() string {
 type Conn struct {
 	conn
 
+	overflow list.List
 	// 存在io-uring相关的控制信息
 	onlyIoUringState
 
-	wbuf             *[]byte // 写缓冲区, 当直接Write失败时，会将数据写入缓冲区
 	mu               sync.Mutex
 	client           bool  // 客户端为true，服务端为false
 	*Config                // 配置
@@ -154,18 +155,15 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return 0, ErrClosed
 	}
 	// 如果缓冲区有数据，合并数据
-	curN := len(b)
 
-	needAppend := false
-	if c.wbuf != nil && len(*c.wbuf) > 0 {
-		needAppend = true
-		old := c.wbuf
-		*c.wbuf = append(*c.wbuf, b...)
-		c.getLogger().Debug("write message", "wbuf_size", len(*c.wbuf), "newbuf.size", len(b))
-		if old != c.wbuf {
-			PutPayloadBytes(old)
-		}
-		b = *c.wbuf
+	if err = c.flushOrClose(); err != nil {
+		return 0, err
+	}
+
+	overflow := false
+	if c.overflow.Len() > 0 {
+		newBuf := GetPayloadBytes(len(b))
+		c.overflow.PushBack(newBuf)
 	}
 
 	total, ws, err := c.writeOrAddPoll(b)
@@ -173,7 +171,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return 0, err
 	}
 
-	if needAppend {
+	if overflow {
 		c.getLogger().Debug("write after",
 			"total", total,
 			"err-is-nil", err == nil,
@@ -184,10 +182,10 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			"write_state", ws.String())
 	}
 	// 出错
-	return curN, err
+	return len(b), err
 }
 
-func (c *Conn) writeOrAddPoll(b []byte) (total int, ws writeState, err error) {
+func (c *Conn) writeOrAddPoll(b []byte) (writeTotal int, ws writeState, err error) {
 	// i 的目的是debug的时候使用
 	var n int
 	fd := c.getFd()
@@ -209,42 +207,30 @@ func (c *Conn) writeOrAddPoll(b []byte) (total int, ws writeState, err error) {
 					n = 0
 				}
 
-				// 记录写入的数据，如果有写入，分配一个新的缓冲区
-				if total+n > 0 {
-					newBuf := GetPayloadBytes(len(b) - n)
-					copy(*newBuf, b[n:])
-					if c.wbuf != nil {
-						PutPayloadBytes(c.wbuf)
-					}
-					c.wbuf = newBuf
-				}
-
 				if err = c.multiEventLoop.addWrite(c, 0); err != nil {
-					return total, writeDefault, err
+					return writeTotal, writeDefault, err
 				}
-				return total, writeEagain, nil
+				return writeTotal, writeEagain, nil
 			}
 
 			c.getLogger().Error("writeOrAddPoll", "err", err.Error(), slog.Int64("fd", c.fd), slog.Int("b.len", len(b)))
 			c.closeInner(err)
-			return total, writeDefault, err
+			return writeTotal, writeDefault, err
 		}
 
 		if n > 0 {
 			b = b[n:]
-			total += n
+			writeTotal += n
 		}
 	}
 
 	// 如果写缓存区有数据，b 参数就是c.wbuf
-	if c.wbuf != nil && len(*c.wbuf) > 0 && len(*c.wbuf) == total {
-		PutPayloadBytes(c.wbuf)
-		c.wbuf = nil
+	if len(b) == writeTotal {
 		if err := c.multiEventLoop.delWrite(c); err != nil {
-			return total, writeDefault, err
+			return writeTotal, writeDefault, err
 		}
 	}
-	return total, writeSuccess, nil
+	return writeTotal, writeSuccess, nil
 }
 
 // 该函数有3个动作
@@ -259,18 +245,30 @@ func (c *Conn) flushOrClose() (err error) {
 		return ErrClosed
 	}
 
-	if c.wbuf != nil {
-		b := *c.wbuf
-		total, ws, err := c.writeOrAddPoll(b)
+	if c.overflow.Len() > 0 {
+		for elem := c.overflow.Front(); elem != nil; {
+			next := elem.Next()
+			buf := elem.Value.(*[]byte)
+			total, _, _ := c.writeOrAddPoll(*buf)
+			if total != len(*buf) {
+				*buf = (*buf)[total:]
+				break
+			}
 
-		c.getLogger().Debug("flush or close after",
-			"total", total,
-			"err-is-nil", err == nil,
-			"need-write", len(b),
-			"addr", c.getPtr(),
-			"closed", c.isClosed(),
-			"fd", c.getFd(),
-			"write_state", ws.String())
+			c.overflow.Remove(elem)
+			PutPayloadBytes(elem.Value.(*[]byte))
+			elem = next
+
+		}
+
+		// c.getLogger().Debug("flush or close after",
+		// 	"total", total,
+		// 	"err-is-nil", err == nil,
+		// 	"need-write", len(b),
+		// 	"addr", c.getPtr(),
+		// 	"closed", c.isClosed(),
+		// 	"fd", c.getFd(),
+		// 	"write_state", ws.String())
 	} else {
 		c.getLogger().Debug("wbuf is nil", "fd", c.getFd())
 		if err := c.multiEventLoop.delWrite(c); err != nil {

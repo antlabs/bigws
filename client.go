@@ -23,6 +23,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/antlabs/wsutil/hostname"
 )
 
 var (
@@ -180,8 +182,9 @@ func (d *DialOption) Dial() (c *Conn, err error) {
 	}
 
 	begin := time.Now()
+	hostName := hostname.GetHostName(d.u)
 	// conn, err := net.DialTimeout("tcp", d.u.Host /* TODO 加端号*/, d.dialTimeout)
-	conn, err := net.Dial("tcp", d.u.Host /* TODO 加端号*/)
+	conn, err := net.Dial("tcp", hostName)
 	if err != nil {
 		return nil, err
 	}
