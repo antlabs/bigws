@@ -72,6 +72,7 @@ func GetPayloadBytes(n int) (rv *[]byte) {
 	}
 
 	rv2 := make([]byte, (index+1)*pageSize)
+	rv2 = rv2[:n]
 	return &rv2
 }
 

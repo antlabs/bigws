@@ -157,6 +157,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	// 如果缓冲区有数据，合并数据
 	if c.overflow.Len() > 0 {
 		newBuf := GetPayloadBytes(len(b))
+		copy(*newBuf, b)
 		c.overflow.PushBack(newBuf)
 
 		if err = c.flushOrClose(false); err != nil {
@@ -172,6 +173,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 	if total != len(b) {
 		newBuf := getBigPayload(len(b[total:]))
+		copy(*newBuf, b)
 		c.overflow.PushBack(newBuf)
 	}
 	// if overflow {
