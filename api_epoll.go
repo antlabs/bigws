@@ -138,16 +138,17 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 			if ev.Events&(unix.EPOLLIN|unix.EPOLLRDHUP|unix.EPOLLHUP|unix.EPOLLERR) > 0 {
 				e.parent.parent.addReadEvNum()
 
-				// 读取数据，这里要发行下websocket的解析变成流式解析
+				// 读取数据，这里websocket的解析变成流式解析
 				_, err = conn.processWebsocketFrame()
 				if err != nil {
 					go conn.closeAndWaitOnMessage(true, err)
+					continue
 				}
 			}
 			if ev.Events&unix.EPOLLOUT > 0 {
 				e.parent.parent.addWriteEvNum()
 				// 刷新下直接写入失败的数据
-				conn.flushOrClose()
+				conn.flushOrClose(true)
 			}
 			if ev.Events&(unix.EPOLLERR|unix.EPOLLHUP|unix.EPOLLRDHUP) > 0 {
 				go conn.closeAndWaitOnMessage(false, io.EOF)

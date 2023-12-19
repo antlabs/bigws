@@ -155,33 +155,36 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return 0, ErrClosed
 	}
 	// 如果缓冲区有数据，合并数据
-
-	if err = c.flushOrClose(); err != nil {
-		return 0, err
-	}
-
-	overflow := false
 	if c.overflow.Len() > 0 {
 		newBuf := GetPayloadBytes(len(b))
 		c.overflow.PushBack(newBuf)
+
+		if err = c.flushOrClose(false); err != nil {
+			return 0, err
+		}
+		return len(b), nil
 	}
 
-	total, ws, err := c.writeOrAddPoll(b)
+	total, _, err := c.writeOrAddPoll(b)
 	if err != nil {
 		return 0, err
 	}
 
-	if overflow {
-		c.getLogger().Debug("write after",
-			"total", total,
-			"err-is-nil", err == nil,
-			"need-write", len(b),
-			"addr", c.getPtr(),
-			"closed", c.isClosed(),
-			"fd", c.getFd(),
-			"write_state", ws.String())
+	if total != len(b) {
+		newBuf := getBigPayload(len(b[total:]))
+		c.overflow.PushBack(newBuf)
 	}
-	// 出错
+	// if overflow {
+	// 	c.getLogger().Debug("write after",
+	// 		"total", total,
+	// 		"err-is-nil", err == nil,
+	// 		"need-write", len(b),
+	// 		"addr", c.getPtr(),
+	// 		"closed", c.isClosed(),
+	// 		"fd", c.getFd(),
+	// 		"write_state", ws.String())
+	// }
+
 	return len(b), err
 }
 
@@ -224,12 +227,6 @@ func (c *Conn) writeOrAddPoll(b []byte) (writeTotal int, ws writeState, err erro
 		}
 	}
 
-	// 如果写缓存区有数据，b 参数就是c.wbuf
-	if len(b) == writeTotal {
-		if err := c.multiEventLoop.delWrite(c); err != nil {
-			return writeTotal, writeDefault, err
-		}
-	}
 	return writeTotal, writeSuccess, nil
 }
 
@@ -237,44 +234,58 @@ func (c *Conn) writeOrAddPoll(b []byte) (writeTotal int, ws writeState, err erro
 // 写成功
 // EAGAIN，等待可写再写
 // 报错，直接关闭这个fd
-func (c *Conn) flushOrClose() (err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (c *Conn) flushOrClose(needLock bool) (err error) {
+	if needLock {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+	}
 
 	if c.isClosed() {
 		return ErrClosed
 	}
 
-	if c.overflow.Len() > 0 {
-		for elem := c.overflow.Front(); elem != nil; {
-			next := elem.Next()
-			buf := elem.Value.(*[]byte)
-			total, _, _ := c.writeOrAddPoll(*buf)
-			if total != len(*buf) {
-				*buf = (*buf)[total:]
-				break
-			}
-
-			c.overflow.Remove(elem)
-			PutPayloadBytes(elem.Value.(*[]byte))
-			elem = next
-
-		}
-
-		// c.getLogger().Debug("flush or close after",
-		// 	"total", total,
-		// 	"err-is-nil", err == nil,
-		// 	"need-write", len(b),
-		// 	"addr", c.getPtr(),
-		// 	"closed", c.isClosed(),
-		// 	"fd", c.getFd(),
-		// 	"write_state", ws.String())
-	} else {
-		c.getLogger().Debug("wbuf is nil", "fd", c.getFd())
+	if c.overflow.Len() == 0 {
+		c.getLogger().Debug("overflow size is 0", "fd", c.getFd())
 		if err := c.multiEventLoop.delWrite(c); err != nil {
 			return err
 		}
 	}
+	needDelWrite := true
+	for elem := c.overflow.Front(); elem != nil; {
+		next := elem.Next()
+		buf := elem.Value.(*[]byte)
+		total, _, err := c.writeOrAddPoll(*buf)
+		if err != nil {
+			return err
+		}
+		if total != len(*buf) {
+			copy(*buf, (*buf)[total:])
+			*buf = (*buf)[len(*buf)-total:]
+			needDelWrite = false
+			break
+		}
+
+		c.overflow.Remove(elem)
+		PutPayloadBytes(elem.Value.(*[]byte))
+		elem = next
+
+	}
+
+	if needDelWrite {
+		if err := c.multiEventLoop.delWrite(c); err != nil {
+			return err
+		}
+	}
+
+	// c.getLogger().Debug("flush or close after",
+	// 	"total", total,
+	// 	"err-is-nil", err == nil,
+	// 	"need-write", len(b),
+	// 	"addr", c.getPtr(),
+	// 	"closed", c.isClosed(),
+	// 	"fd", c.getFd(),
+	// 	"write_state", ws.String())
+
 	return err
 }
 
@@ -309,7 +320,7 @@ func (c *Conn) processWebsocketFrame() (n int, err error) {
 			// 读到eof，直接关闭
 			if n == 0 && len((*c.rbuf)[c.rw:]) > 0 {
 				go func() {
-					c.closeAndWaitOnMessage(true, io.EOF)
+					c.closeAndWaitOnMessage(false, io.EOF)
 					c.OnClose(c, io.EOF)
 				}()
 				return
