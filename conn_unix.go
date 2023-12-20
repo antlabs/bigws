@@ -176,6 +176,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		copy(*newBuf, b)
 		c.overflow.PushBack(newBuf)
 	}
+
 	// if overflow {
 	// 	c.getLogger().Debug("write after",
 	// 		"total", total,
@@ -211,7 +212,9 @@ func (c *Conn) writeOrAddPoll(b []byte) (writeTotal int, ws writeState, err erro
 				if n < 0 {
 					n = 0
 				}
-
+				if n > 0 {
+					panic("n > 0")
+				}
 				if err = c.multiEventLoop.addWrite(c, 0); err != nil {
 					return writeTotal, writeDefault, err
 				}
@@ -248,10 +251,9 @@ func (c *Conn) flushOrClose(needLock bool) (err error) {
 
 	if c.overflow.Len() == 0 {
 		c.getLogger().Debug("overflow size is 0", "fd", c.getFd())
-		if err := c.multiEventLoop.delWrite(c); err != nil {
-			return err
-		}
+		return c.multiEventLoop.delWrite(c)
 	}
+
 	needDelWrite := true
 	for elem := c.overflow.Front(); elem != nil; {
 		next := elem.Next()
