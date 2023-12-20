@@ -166,11 +166,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return len(b), nil
 	}
 
+	// 直接写入
 	total, _, err := c.writeOrAddPoll(b)
 	if err != nil {
 		return 0, err
 	}
 
+	// 写入失败
 	if total != len(b) {
 		newBuf := getBigPayload(len(b[total:]))
 		copy(*newBuf, b)
@@ -262,9 +264,10 @@ func (c *Conn) flushOrClose(needLock bool) (err error) {
 		if err != nil {
 			return err
 		}
+		
 		if total != len(*buf) {
 			copy(*buf, (*buf)[total:])
-			*buf = (*buf)[len(*buf)-total:]
+			*buf = (*buf)[:len(*buf)-total]
 			needDelWrite = false
 			break
 		}
