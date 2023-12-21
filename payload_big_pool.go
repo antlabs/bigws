@@ -1,6 +1,9 @@
 package greatws
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // import "sync"
 
@@ -12,6 +15,7 @@ var bigPool = sync.Pool{
 }
 
 func getBigPayload(n int) (rv *[]byte) {
+	atomic.AddInt64(&getBigPayloadNum, 1)
 	rv = bigPool.Get().(*[]byte)
 	if cap(*rv) < n {
 		tmp := make([]byte, n)
@@ -23,5 +27,6 @@ func getBigPayload(n int) (rv *[]byte) {
 }
 
 func putBigPayload(buf *[]byte) {
+	atomic.AddInt64(&getBigPayloadNum, 1)
 	bigPool.Put(buf)
 }

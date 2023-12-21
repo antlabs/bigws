@@ -148,7 +148,7 @@ func (e *epollState) apiPoll(tv time.Duration) (retVal int, err error) {
 			if ev.Events&unix.EPOLLOUT > 0 {
 				e.parent.parent.addWriteEvNum()
 				// 刷新下直接写入失败的数据
-				conn.flushOrClose(true)
+				conn.flushOrClose()
 			}
 			if ev.Events&(unix.EPOLLERR|unix.EPOLLHUP|unix.EPOLLRDHUP) > 0 {
 				go conn.closeAndWaitOnMessage(false, io.EOF)

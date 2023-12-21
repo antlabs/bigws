@@ -156,16 +156,26 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	}
 	// 如果缓冲区有数据，合并数据
 	if c.overflow.Len() > 0 {
+		writeAll, err := c.flushOrCloseInner(false)
+		if err != nil {
+			return 0, err
+		}
+
+		if writeAll {
+			goto writeCurr
+		}
+
 		newBuf := GetPayloadBytes(len(b))
+		if len(*newBuf) != len(b) {
+			panic(fmt.Sprintf("len(*newBuf) != len(b), %d != %d", len(*newBuf), len(b)))
+		}
 		copy(*newBuf, b)
 		c.overflow.PushBack(newBuf)
 
-		if err = c.flushOrClose(false); err != nil {
-			return 0, err
-		}
 		return len(b), nil
 	}
 
+writeCurr:
 	// 直接写入
 	total, _, err := c.writeOrAddPoll(b)
 	if err != nil {
@@ -174,8 +184,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 	// 写入失败
 	if total != len(b) {
-		newBuf := getBigPayload(len(b[total:]))
-		copy(*newBuf, b)
+		newBuf := GetPayloadBytes(len(b[total:]))
+		copy(*newBuf, b[total:])
 		c.overflow.PushBack(newBuf)
 	}
 
@@ -241,19 +251,24 @@ func (c *Conn) writeOrAddPoll(b []byte) (writeTotal int, ws writeState, err erro
 // 写成功
 // EAGAIN，等待可写再写
 // 报错，直接关闭这个fd
-func (c *Conn) flushOrClose(needLock bool) (err error) {
+func (c *Conn) flushOrClose() (err error) {
+	_, err = c.flushOrCloseInner(true)
+	return err
+}
+
+func (c *Conn) flushOrCloseInner(needLock bool) (writeAll bool, err error) {
 	if needLock {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 	}
 
 	if c.isClosed() {
-		return ErrClosed
+		return false, ErrClosed
 	}
 
 	if c.overflow.Len() == 0 {
 		c.getLogger().Debug("overflow size is 0", "fd", c.getFd())
-		return c.multiEventLoop.delWrite(c)
+		return false, c.multiEventLoop.delWrite(c)
 	}
 
 	needDelWrite := true
@@ -262,9 +277,9 @@ func (c *Conn) flushOrClose(needLock bool) (err error) {
 		buf := elem.Value.(*[]byte)
 		total, _, err := c.writeOrAddPoll(*buf)
 		if err != nil {
-			return err
+			return false, err
 		}
-		
+
 		if total != len(*buf) {
 			copy(*buf, (*buf)[total:])
 			*buf = (*buf)[:len(*buf)-total]
@@ -280,20 +295,11 @@ func (c *Conn) flushOrClose(needLock bool) (err error) {
 
 	if needDelWrite {
 		if err := c.multiEventLoop.delWrite(c); err != nil {
-			return err
+			return false, err
 		}
 	}
 
-	// c.getLogger().Debug("flush or close after",
-	// 	"total", total,
-	// 	"err-is-nil", err == nil,
-	// 	"need-write", len(b),
-	// 	"addr", c.getPtr(),
-	// 	"closed", c.isClosed(),
-	// 	"fd", c.getFd(),
-	// 	"write_state", ws.String())
-
-	return err
+	return needDelWrite, err
 }
 
 // kqueu/epoll模式下，读取数据

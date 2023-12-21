@@ -4,17 +4,13 @@ import (
 	"sync"
 )
 
-// 多级缓存池，只有当缓存池的大小不够时，才会使用大缓存池
+var (
+	getPaylodNum     int64
+	putPayloadNum    int64
+	getBigPayloadNum int64
+	putBigPayloadNum int64
+)
 
-// 多级缓存池，主要是为了减少内存占用
-// greatws 主要有三部分内存占用:
-//  1. read buffer(没有使用本缓存池)
-//     1.1 直接调用unix.Read时使用(没有使用本缓存池)
-//     1.2 websocket payload数据包(使用)
-//  2. write buffer
-//     2.1  直接调用unix.Write时使用(没有使用本缓存池)
-//     2.2  unix.Write失败调用，缓存未成功写入数据, c.wbuf(使用)
-//  3. fragment buffer websocket协议里面的分段数据包(使用)
 func init() {
 	for i := 1; i <= maxIndex; i++ {
 		j := i
@@ -56,13 +52,16 @@ func GetPayloadBytes(n int) (rv *[]byte) {
 		return &emptyBytes
 	}
 
+	// fmt.Printf("get payload bytes: %d\n", n)
 	index := getSelectIndex(n)
 	if index >= len(pools) {
 		return getBigPayload(n)
 	}
 
+	// 最多尝试3次
 	for i := 0; i < 3; i++ {
 
+		// 可能是不规则的大小
 		rv2 := pools[index].Get().(*[]byte)
 		if cap(*rv2) < n {
 			continue
@@ -76,7 +75,10 @@ func GetPayloadBytes(n int) (rv *[]byte) {
 	return &rv2
 }
 
+// 可以保存不规则大小的payload
 func PutPayloadBytes(bytes *[]byte) {
+	// fmt.Printf("put payload bytes: %d:%d\n", len(*bytes), cap(*bytes))
+
 	if cap(*bytes) == 0 {
 		return
 	}

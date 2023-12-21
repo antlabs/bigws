@@ -146,7 +146,7 @@ func (e *EventLoop) apiPoll(tv time.Duration) (retVal int, err error) {
 
 			if ev.Filter == unix.EVFILT_WRITE {
 				// 刷新下直接写入失败的数据
-				conn.flushOrClose(true)
+				conn.flushOrClose()
 			}
 
 		}
