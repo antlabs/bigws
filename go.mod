@@ -1,4 +1,4 @@
-module github.com/antlabs/greatws
+module github.com/prr123/greatws
 
 go 1.21.1
 
